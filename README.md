@@ -41,9 +41,14 @@ This script converts audio files to the Opus format, which offers excellent soun
 - Adjustable bitrate (32-512 kbps)
 - Configurable directory search depth
 
-#### Usage:
+#### Usage: CLI
 ```bash
 ./audio-to-opus.sh [-b bitrate] [-d depth] [-h]
+```
+
+#### Usage: Termux
+```bash
+bash audio-to-opus.sh [-b bitrate] [-d depth] [-h]
 ```
 
 Options:
@@ -64,10 +69,16 @@ This script analyzes audio files' metadata and organizes them into a directory s
 - Interactive mode to select which formats to process
 - Detailed error handling and reporting
 
-#### Usage:
+#### Usage: CLI
 ```bash
 ./organize-music.sh [OPTIONS] <directory_path>
 ```
+
+#### Usage: Termux
+```bash
+bash organize-music.sh [OPTIONS] <directory_path>
+```
+
 
 Options:
 - `-h, --help`: Show help message
