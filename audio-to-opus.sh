@@ -5,6 +5,7 @@ declare -a all_source_files
 declare -a opusenc_failed
 declare -a ffmpeg_failed
 declare -a already_converted
+declare -a skipped_files
 
 # Supported input formats
 readonly SUPPORTED_FORMATS=("flac" "wav" "m4a" "alac" "aiff" "ape" "wv")
@@ -60,6 +61,41 @@ check_opus() {
     return 1
 }
 
+# Function to get audio bitrate using ffprobe
+get_audio_bitrate() {
+    local file="$1"
+    local bitrate=$(ffprobe -v error -select_streams a:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null)
+    
+    # If bitrate is in bits per second, convert to kbps
+    if [[ -n "$bitrate" ]]; then
+        # Check if bitrate is in bits per second
+        if [[ "$bitrate" -gt 1000 ]]; then
+            bitrate=$((bitrate / 1000))
+        fi
+        echo "$bitrate"
+    else
+        echo "0"
+    fi
+}
+
+# Function to check if file should be skipped (for m4a files)
+should_skip_conversion() {
+    local file="$1"
+    local ext="${file##*.}"
+    ext="${ext,,}"  # Convert to lowercase
+    
+    # Only apply bitrate check for m4a files
+    if [[ "$ext" == "m4a" ]]; then
+        local bitrate=$(get_audio_bitrate "$file")
+        
+        # Skip if bitrate is close to target (within +/- 20 kbps)
+        if [[ -n "$bitrate" ]] && [[ "$bitrate" -ge $((BITRATE - 20)) ]] && [[ "$bitrate" -le $((BITRATE + 20)) ]]; then
+            return 0  # Skip conversion
+        fi
+    fi
+    return 1  # Do not skip
+}
+
 # Function to collect all supported audio files
 collect_audio_files() {
     local files=()
@@ -96,6 +132,10 @@ check_requirements() {
     
     if ! command -v parallel >/dev/null 2>&1; then
         missing_tools+=("parallel")
+    fi
+    
+    if ! command -v ffprobe >/dev/null 2>&1; then
+        missing_tools+=("ffprobe (from ffmpeg package)")
     fi
     
     if [ ${#missing_tools[@]} -gt 0 ]; then
@@ -173,6 +213,28 @@ else
 fi
 echo
 
+# Prepare files to skip and process
+skipped_files_file="$temp_dir/skipped_files.txt"
+touch "$skipped_files_file"
+
+# Identify files to skip
+for source in "${all_source_files[@]}"; do
+    if should_skip_conversion "$source"; then
+        echo "$source" >> "$skipped_files_file"
+    fi
+done
+
+# Read skipped files
+mapfile -t skipped_files < "$skipped_files_file"
+
+# Prepare list of processable files
+processable_files=()
+for source in "${all_source_files[@]}"; do
+    if ! grep -qxF "$source" "$skipped_files_file"; then
+        processable_files+=("$source")
+    fi
+done
+
 # First pass: opusenc conversion using parallel
 echo "Starting first pass with opusenc (parallel processing)..."
 echo "--------------------------------------------------"
@@ -181,6 +243,8 @@ echo "Converting all possible files with opusenc..."
 # Export function for parallel to use
 export -f check_opus
 export -f safe_remove
+export -f should_skip_conversion
+export -f get_audio_bitrate
 export BITRATE
 export temp_dir
 
@@ -188,8 +252,8 @@ export temp_dir
 opusenc_error_file="$temp_dir/opusenc_errors.txt"
 touch "$opusenc_error_file"
 
-# Parallel opusenc conversion for FLAC and WAV files (preferred for these formats)
-parallel --will-cite 'source_file={1}; opus_file=${source_file%.*}.opus; ext="${source_file##*.}"; ext="${ext,,}"; if [[ "$ext" == "flac" ]] || [[ "$ext" == "wav" ]]; then if opusenc --vbr --bitrate $BITRATE "$source_file" "$opus_file" 2>"$temp_dir/$(basename "$source_file").err"; then if ! check_opus "$opus_file"; then safe_remove "$opus_file"; echo "$source_file" >> "$temp_dir/opusenc_errors.txt"; fi; else safe_remove "$opus_file"; echo "$source_file" >> "$temp_dir/opusenc_errors.txt"; fi; else echo "$source_file" >> "$temp_dir/opusenc_errors.txt"; fi' ::: "${all_source_files[@]}"
+# Parallel opusenc conversion
+parallel --will-cite 'source_file={1}; opus_file=${source_file%.*}.opus; ext="${source_file##*.}"; ext="${ext,,}"; if [[ "$ext" == "flac" ]] || [[ "$ext" == "wav" ]]; then if opusenc --vbr --bitrate $BITRATE "$source_file" "$opus_file" 2>"$temp_dir/$(basename "$source_file").err"; then if ! check_opus "$opus_file"; then safe_remove "$opus_file"; echo "$source_file" >> "$temp_dir/opusenc_errors.txt"; fi; else safe_remove "$opus_file"; echo "$source_file" >> "$temp_dir/opusenc_errors.txt"; fi; else echo "$source_file" >> "$temp_dir/opusenc_errors.txt"; fi' ::: "${processable_files[@]}"
 
 # Read the error file to get failed conversions
 mapfile -t opusenc_failed < "$temp_dir/opusenc_errors.txt"
@@ -221,8 +285,10 @@ echo "Conversion Summary"
 echo "-----------------"
 echo "Total audio files found: $total_files"
 echo "Previously converted files (backed up): ${#already_converted[@]}"
+echo "Skipped files (near target bitrate): ${#skipped_files[@]}"
 
-opusenc_success_count=$((total_files - ${#opusenc_failed[@]} - ${#already_converted[@]}))
+total_processable=$((total_files - ${#skipped_files[@]}))
+opusenc_success_count=$((total_processable - ${#opusenc_failed[@]} - ${#already_converted[@]}))
 ffmpeg_success_count=$(( ${#opusenc_failed[@]} - ${#ffmpeg_failed[@]} ))
 
 echo "Successfully converted with opusenc: $opusenc_success_count"
@@ -253,6 +319,14 @@ if [ ${#ffmpeg_failed[@]} -gt 0 ]; then
     fi
 fi
 
+# List skipped files if any
+if [ ${#skipped_files[@]} -gt 0 ]; then
+    echo
+    echo "Skipped files (near target bitrate):"
+    echo "-----------------------------------"
+    printf '%s\n' "${skipped_files[@]}"
+fi
+
 # Provide restore instructions only if backups were created
 if $has_existing_opus; then
     echo
@@ -270,6 +344,6 @@ if [ ${#ffmpeg_failed[@]} -gt 0 ]; then
     exit 1
 else
     echo
-    echo "All files converted successfully."
+    echo "All convertible files processed successfully."
     exit 0
 fi
