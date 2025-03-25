@@ -78,18 +78,19 @@ get_audio_bitrate() {
     fi
 }
 
-# Function to check if file should be skipped (for m4a files)
+# Function to check if file should be skipped based on bitrate
 should_skip_conversion() {
     local file="$1"
     local ext="${file##*.}"
     ext="${ext,,}"  # Convert to lowercase
     
-    # Only apply bitrate check for m4a files
-    if [[ "$ext" == "m4a" ]]; then
-        local bitrate=$(get_audio_bitrate "$file")
-        
-        # Skip if bitrate is close to target (within +/- 20 kbps)
+    # Skip if bitrate is close to target (within +/- 20 kbps) for any format
+    local bitrate=$(get_audio_bitrate "$file")
+    
+    # For m4a specifically, only check bitrate
+    if [[ "$ext" == "m4a" ]] || [[ "$ext" == "flac" ]] || [[ "$ext" == "wav" ]] || [[ "$ext" == "alac" ]]; then
         if [[ -n "$bitrate" ]] && [[ "$bitrate" -ge $((BITRATE - 20)) ]] && [[ "$bitrate" -le $((BITRATE + 20)) ]]; then
+            echo "Skipped $file due to bitrate proximity: $bitrate kbps"
             return 0  # Skip conversion
         fi
     fi
@@ -324,7 +325,10 @@ if [ ${#skipped_files[@]} -gt 0 ]; then
     echo
     echo "Skipped files (near target bitrate):"
     echo "-----------------------------------"
-    printf '%s\n' "${skipped_files[@]}"
+    for file in "${skipped_files[@]}"; do
+        bitrate=$(get_audio_bitrate "$file")
+        printf "%s (bitrate: %s kbps)\n" "$file" "$bitrate"
+    done
 fi
 
 # Provide restore instructions only if backups were created
