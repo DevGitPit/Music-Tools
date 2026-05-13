@@ -67,7 +67,7 @@ get_audio_bitrate() {
     local bitrate=$(ffprobe -v error -select_streams a:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null)
     
     # If bitrate is in bits per second, convert to kbps
-    if [[ -n "$bitrate" ]]; then
+    if [[ "$bitrate" =~ ^[0-9]+$ ]]; then
         # Check if bitrate is in bits per second
         if [[ "$bitrate" -gt 1000 ]]; then
             bitrate=$((bitrate / 1000))
@@ -89,7 +89,7 @@ should_skip_conversion() {
     
     # For m4a specifically, only check bitrate
     if [[ "$ext" == "m4a" ]] || [[ "$ext" == "flac" ]] || [[ "$ext" == "wav" ]] || [[ "$ext" == "alac" ]]; then
-        if [[ -n "$bitrate" ]] && [[ "$bitrate" -ge $((BITRATE - 20)) ]] && [[ "$bitrate" -le $((BITRATE + 20)) ]]; then
+        if [[ "$bitrate" =~ ^[0-9]+$ ]] && [[ "$bitrate" -ne 0 ]] && [[ "$bitrate" -ge $((BITRATE - 20)) ]] && [[ "$bitrate" -le $((BITRATE + 20)) ]]; then
             echo "Skipped $file due to bitrate proximity: $bitrate kbps"
             return 0  # Skip conversion
         fi
@@ -241,11 +241,51 @@ echo "Starting first pass with opusenc (parallel processing)..."
 echo "--------------------------------------------------"
 echo "Converting all possible files with opusenc..."
 
-# Export function for parallel to use
+# Function for opusenc conversion
+convert_opusenc() {
+    local source_file="$1"
+    local opus_file="${source_file%.*}.opus"
+    local ext="${source_file##*.}"
+    ext="${ext,,}"
+    
+    if [[ "$ext" == "flac" ]] || [[ "$ext" == "wav" ]]; then
+        if opusenc --vbr --bitrate "$BITRATE" "$source_file" "$opus_file" 2>"$temp_dir/$(basename "$source_file").err"; then
+            if ! check_opus "$opus_file"; then
+                safe_remove "$opus_file"
+                echo "$source_file" >> "$temp_dir/opusenc_errors.txt"
+            fi
+        else
+            safe_remove "$opus_file"
+            echo "$source_file" >> "$temp_dir/opusenc_errors.txt"
+        fi
+    else
+        echo "$source_file" >> "$temp_dir/opusenc_errors.txt"
+    fi
+}
+
+# Function for ffmpeg conversion
+convert_ffmpeg() {
+    local source_file="$1"
+    local opus_file="${source_file%.*}.opus"
+    
+    if ffmpeg -v error -i "$source_file" -c:a libopus -b:a "${BITRATE}k" -vbr on -application audio "$opus_file" 2>"$temp_dir/ffmpeg_$(basename "$source_file").err"; then
+        if ! check_opus "$opus_file"; then
+            safe_remove "$opus_file"
+            echo "$source_file" >> "$temp_dir/ffmpeg_errors.txt"
+        fi
+    else
+        safe_remove "$opus_file"
+        echo "$source_file" >> "$temp_dir/ffmpeg_errors.txt"
+    fi
+}
+
+# Export functions for parallel to use
 export -f check_opus
 export -f safe_remove
 export -f should_skip_conversion
 export -f get_audio_bitrate
+export -f convert_opusenc
+export -f convert_ffmpeg
 export BITRATE
 export temp_dir
 
@@ -254,7 +294,7 @@ opusenc_error_file="$temp_dir/opusenc_errors.txt"
 touch "$opusenc_error_file"
 
 # Parallel opusenc conversion
-parallel --will-cite 'source_file={1}; opus_file=${source_file%.*}.opus; ext="${source_file##*.}"; ext="${ext,,}"; if [[ "$ext" == "flac" ]] || [[ "$ext" == "wav" ]]; then if opusenc --vbr --bitrate $BITRATE "$source_file" "$opus_file" 2>"$temp_dir/$(basename "$source_file").err"; then if ! check_opus "$opus_file"; then safe_remove "$opus_file"; echo "$source_file" >> "$temp_dir/opusenc_errors.txt"; fi; else safe_remove "$opus_file"; echo "$source_file" >> "$temp_dir/opusenc_errors.txt"; fi; else echo "$source_file" >> "$temp_dir/opusenc_errors.txt"; fi' ::: "${processable_files[@]}"
+parallel --will-cite convert_opusenc ::: "${processable_files[@]}"
 
 # Read the error file to get failed conversions
 mapfile -t opusenc_failed < "$temp_dir/opusenc_errors.txt"
@@ -272,7 +312,7 @@ if [ ${#opusenc_failed[@]} -gt 0 ]; then
     touch "$ffmpeg_error_file"
 
     # Parallel ffmpeg conversion for remaining files
-    parallel --will-cite 'source_file={1}; opus_file=${source_file%.*}.opus; if ffmpeg -v error -i "$source_file" -c:a libopus -b:a ${BITRATE}k -vbr on -application audio "$opus_file" 2>"$temp_dir/ffmpeg_$(basename "$source_file").err"; then if ! check_opus "$opus_file"; then safe_remove "$opus_file"; echo "$source_file" >> "$temp_dir/ffmpeg_errors.txt"; fi; else safe_remove "$opus_file"; echo "$source_file" >> "$temp_dir/ffmpeg_errors.txt"; fi' ::: "${opusenc_failed[@]}"
+    parallel --will-cite convert_ffmpeg ::: "${opusenc_failed[@]}"
 
     # Read the error file to get failed conversions
     mapfile -t ffmpeg_failed < "$ffmpeg_error_file"

@@ -67,10 +67,14 @@ sanitize_path() {
     local sanitized=$(echo "$input" | tr -d '\r' | tr -d '\n' | tr -d '\t')
     # Replace forward slashes with dashes to prevent directory traversal
     sanitized=$(echo "$sanitized" | tr '/' '-')
-    # Remove other problematic characters
-    sanitized=$(echo "$sanitized" | tr -d '/<>:"|?*\\')
-    # Trim leading/trailing whitespace
-    sanitized=$(echo "$sanitized" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    # Remove other problematic characters (including backslash and others)
+    sanitized=$(echo "$sanitized" | tr -d '<>:"|?*\\')
+    # Specifically remove ".." to prevent path traversal
+    while [[ "$sanitized" == *".."* ]]; do
+        sanitized="${sanitized//../.}"
+    done
+    # Remove leading/trailing dots and whitespace
+    sanitized=$(echo "$sanitized" | sed -e 's/^[[:space:].]*//' -e 's/[[:space:].]*$//')
     # Replace multiple spaces with single space
     sanitized=$(echo "$sanitized" | tr -s ' ')
     # If sanitized string is empty, return "Unknown"
